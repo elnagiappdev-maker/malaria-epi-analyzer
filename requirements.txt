@@ -1,8 +1,9 @@
 streamlit
 pandas
-requests
-PyMuPDF
-pillow
-openpyxl
 python-docx
+XlsxWriter
+openpyxl
+PyMuPDF
+requests
 matplotlib
+Pillow
