@@ -1,34 +1,27 @@
-import os
-os.environ["STREAMLIT_WATCHER_TYPE"] = "poll"  # avoid inotify errors
-
-import io, json
+import os, json, io
 from datetime import datetime, date
 import pandas as pd
 import streamlit as st
-import requests
-import fitz  # PyMuPDF
-from PIL import Image
-from docx import Document
-from docx.shared import Inches
-import matplotlib.pyplot as plt
 
-# ========== Configuration / Constants ==========
+from extractor import extract_fields_from_text, normalize_record
+from validator import validate_record
+from reports import generate_word_report, email_file
+from ocr_utils import ocr_from_file_grouped as cloud_ocr  # ✅ Use improved OCR
+
 APP_NAME = "Malaria Epidemiological Analyzer"
-DEDICATION_TEXT = "To the Soul of my Late Father, My Long Living Mother, My Lovely wife and My Eyes Abdulrahman & Osman"
+DEDICATION_TEXT = "To the Soul of my Late Father, My Long Living Mother, My Lovely Wife and My Eyes Abdulrahman & Osman"
 
-GROUP_SIZE = 4  # pages per patient form
-API_URL = "https://api.ocr.space/parse/image"
-
-# ========== Authentication / Secrets ==========
+# Use secrets for credentials
 try:
     VALID_USERNAME = st.secrets["APP_USERNAME"]
     VALID_PASSWORD = st.secrets["APP_PASSWORD"]
 except KeyError:
-    st.error("❌ Credentials not set. Add APP_USERNAME & APP_PASSWORD to Streamlit secrets.")
+    st.error("❌ Application credentials not configured. Please set APP_USERNAME and APP_PASSWORD in Streamlit secrets.")
     st.stop()
 
-# ========== Layout & Styles ==========
 st.set_page_config(page_title=APP_NAME, layout="wide")
+
+# ========= Custom Styling ==========
 st.markdown("""
 <style>
 html, body, .stApp, [data-testid="stAppViewContainer"] {
@@ -42,243 +35,208 @@ html, body, .stApp, [data-testid="stAppViewContainer"] {
 }
 .app-name { text-align:center; color:#1f6feb; font-weight:800; margin:6px 0 10px 0; font-size: clamp(20px, 4vw, 30px); }
 .login-sub { text-align:center; color:#334155; margin-bottom:16px; font-size: clamp(12px, 2.5vw, 15px); }
+
 .app-footer {
-  position: fixed;
-  left: 0; right: 0;
-  bottom: 30px; /* raise above watermark */
-  width: 100%;
-  text-align: center;
-  padding: 8px 8px 0 8px;
-  background: #ffffffea;
-  border-top: 1px solid #e5e7eb;
-  z-index: 9999;
+  position: relative;
+  text-align:center; padding:8px 8px 40px 8px;
+  background:#ffffffea; border-top:1px solid #e5e7eb;
 }
 .footer-rights { font-weight:700; color:#1f6feb; margin-bottom:6px; }
-.footer-dedication { font-weight:700; color:#0f172a; margin-bottom:8px; }
-@media (max-width: 480px) { .login-card { padding:16px 14px; border-radius:14px; } }
+.footer-dedication {
+  font-weight:700; color:#0f172a; margin-bottom:8px;
+  position: relative; z-index: 9999;
+}
 </style>
 """, unsafe_allow_html=True)
 
 def render_footer():
     st.markdown(
-        '<div class="app-footer">'
-        '<div class="footer-rights">All Rights Reserved to Dr. Mohammedelnagi Mohammed</div>'
+        f'<div class="app-footer">'
+        f'<div class="footer-rights">All Rights Reserved to Dr. Mohammedelnagi Mohammed</div>'
         f'<div class="footer-dedication"><b>Dedication:</b> {DEDICATION_TEXT}</div>'
-        '</div>',
+        f'</div>',
         unsafe_allow_html=True
     )
 
-# ========== OCR / PDF Helpers ==========
+# ===== Auth =====
+def ensure_session():
+    if "logged_in" not in st.session_state: 
+        st.session_state.logged_in = False
+    if "login_error" not in st.session_state: 
+        st.session_state.login_error = ""
 
-def pdf_to_images(pdf_bytes: bytes):
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    images = []
-    for pg in doc:
-        pix = pg.get_pixmap(dpi=200)
-        img = Image.open(io.BytesIO(pix.tobytes("png")))
-        images.append(img)
-    return images
-
-def _post_ocr_image(image: Image.Image, filename: str, api_key: str, language: str = "eng,ara"):
-    buf = io.BytesIO()
-    image.save(buf, format="PNG")
-    buf.seek(0)
-    files = {"file": (filename, buf)}
-    data = {
-        "language": language,
-        "isOverlayRequired": False,
-        "OCREngine": 2,
-        "scale": True,
-        "isTable": True
-    }
-    headers = {"apikey": api_key}
-    resp = requests.post(API_URL, data=data, files=files, headers=headers, timeout=300)
-    resp.raise_for_status()
-    j = resp.json()
-    if j.get("IsErroredOnProcessing"):
-        error_msg = j.get("ErrorMessage") or j.get("ErrorDetails") or "Unknown OCR error"
-        raise RuntimeError(f"OCR Error: {error_msg}")
-    return j["ParsedResults"][0]["ParsedText"]
-
-def ocr_from_file_grouped(uploaded_file, api_key, languages="eng,ara", group_size=GROUP_SIZE):
-    if hasattr(uploaded_file, "seek"):
-        uploaded_file.seek(0)
-    file_bytes = uploaded_file.read() if hasattr(uploaded_file, "read") else uploaded_file
-    fname = getattr(uploaded_file, "name", "upload").lower()
-    results = []
-    if fname.endswith(".pdf"):
-        imgs = pdf_to_images(file_bytes)
-        for i in range(0, len(imgs), group_size):
-            chunk = imgs[i:i+group_size]
-            texts = []
-            for j, img in enumerate(chunk):
-                try:
-                    t = _post_ocr_image(img, f"page_{i+j+1}.png", api_key, languages)
-                    texts.append(t)
-                except Exception as e:
-                    texts.append(f"[ERROR on page {i+j+1}]: {e}")
-            merged = "\n\n".join(texts)
-            results.append(merged)
-    else:
-        img = Image.open(io.BytesIO(file_bytes))
-        texts = _post_ocr_image(img, fname, api_key, languages)
-        results.append(texts)
-    return results
-
-# ========== Parsing, Validation, etc. ==========
-
-def infer_species(text: str):
-    t = text.lower()
-    for k in ["falciparum", "vivax", "ovale", "malariae", "knowlesi"]:
-        if k in t:
-            return k.capitalize()
-    return "Unknown"
-
-def normalize_record(rec: dict):
-    # Dummy pass-through or apply your real normalizing logic
-    return rec
-
-def validate_record(rec: dict):
-    # Dummy validation (replace with your logic)
-    return {"valid": True}
-
-# ========== Word Report with Charts ==========
-
-def generate_word_report(df: pd.DataFrame, filename: str):
-    doc = Document()
-    doc.add_heading("Malaria Epidemiological Report", level=1)
-    doc.add_paragraph(f"Date: {date.today().isoformat()}")
-    # Add species pie chart
-    if "species" in df.columns:
-        species_counts = df["species"].fillna("Unknown").value_counts()
-        fig, ax = plt.subplots()
-        species_counts.plot.pie(autopct="%1.1f%%", ax=ax, legend=False)
-        ax.set_ylabel("")
-        fig.savefig("species_pie.png")
-        doc.add_heading("Species Distribution", level=2)
-        doc.add_picture("species_pie.png", width=Inches(4))
-    # Add EpiCurve (cases over time)
-    if "symptom_start" in df.columns:
-        df["symptom_start"] = pd.to_datetime(df["symptom_start"], errors="coerce")
-        df2 = df.dropna(subset=["symptom_start"])
-        if not df2.empty:
-            counts = df2.groupby(df2["symptom_start"].dt.date).size()
-            fig2, ax2 = plt.subplots(figsize=(5, 3))
-            counts.plot(kind="line", marker="o", ax=ax2)
-            ax2.set_xlabel("Date")
-            ax2.set_ylabel("Number of Cases")
-            fig2.savefig("epicurve.png")
-            doc.add_heading("EpiCurve", level=2)
-            doc.add_picture("epicurve.png", width=Inches(5))
-    # Add table of data (first few rows for simplicity)
-    doc.add_heading("Summary Table", level=2)
-    table = doc.add_table(rows=1, cols=len(df.columns))
-    hdr = table.rows[0].cells
-    for i, c in enumerate(df.columns):
-        hdr[i].text = str(c)
-    for _, row in df.iterrows():
-        r_cells = table.add_row().cells
-        for i, c in enumerate(df.columns):
-            r_cells[i].text = str(row[c])
-    out_path = filename
-    doc.save(out_path)
-    return out_path
-
-# ========== Streamlit App Logic ==========
+def check_credentials(u, p): 
+    return (u == VALID_USERNAME and p == VALID_PASSWORD)
 
 def render_login():
     st.markdown('<div class="login-wrap"><div class="login-card">', unsafe_allow_html=True)
     st.markdown(f'<div class="app-name">{APP_NAME}</div>', unsafe_allow_html=True)
-    st.markdown('<div class="login-sub">Please enter your credentials.</div>', unsafe_allow_html=True)
-    with st.form("login_form"):
-        u = st.text_input("Username", key="login_user")
-        p = st.text_input("Password", type="password", key="login_pass")
+    st.markdown('<div class="login-sub">Please enter your credentials to continue.</div>', unsafe_allow_html=True)
+    
+    with st.form("login_form", clear_on_submit=False):
+        u = st.text_input("Username", value="", key="login_user")
+        p = st.text_input("Password", value="", type="password", key="login_pass")
         submitted = st.form_submit_button("Log in")
+        
         if submitted:
-            if u == VALID_USERNAME and p == VALID_PASSWORD:
+            if check_credentials(u, p):
                 st.session_state.logged_in = True
+                st.session_state.login_error = ""
                 st.rerun()
             else:
-                st.error("Invalid username or password.")
+                st.session_state.login_error = "Invalid username or password."
+    
+    if st.session_state.login_error: 
+        st.error(st.session_state.login_error)
+    
     st.markdown('</div></div>', unsafe_allow_html=True)
     render_footer()
 
+# ===== Utilities =====
+def infer_species(text: str) -> str:
+    t = text.lower()
+    for k in ["falciparum", "vivax", "ovale", "malariae", "knowlesi"]:
+        if k in t: 
+            return k.capitalize()
+    return "Unknown"
+
+def to_df(records): 
+    return pd.DataFrame(records) if records else pd.DataFrame()
+
+# ===== Main App =====
 def render_app():
     st.title(APP_NAME)
-    st.caption("OCR, process, and analyze malaria forms.")
+    st.caption("Secure OCR (cloud API) or Excel ingestion, validation, and reporting.")
+
     with st.sidebar:
         st.header("Account")
-        st.success("Logged in")
+        st.success("Logged in as Admin")
         if st.button("Log out"):
             st.session_state.logged_in = False
+            st.session_state.login_error = ""
             st.rerun()
+
+        st.divider()
+        st.header("Actions")
+        mode = st.radio("Choose input mode:", ["Upload PDFs (OCR via cloud)", "Upload Excel"], index=0)
+
         st.divider()
         st.header("Diagnostics")
-        key = st.secrets.get("OCRSPACE_API_KEY", "")
-        st.code(f"OCR key: {'configured' if key else 'Missing'}", language="bash")
+        ocr_key = st.secrets.get("OCRSPACE_API_KEY", "")
+        st.code(f"OCR API key: {'configured' if bool(ocr_key) else 'missing'}", language="bash")
 
-    mode = st.radio("Mode:", ["Upload PDFs/Images", "Upload Excel"])
     records = []
     df = pd.DataFrame()
 
-    if mode.startswith("Upload"):
-        files = st.file_uploader("Upload files", type=["pdf","png","jpg","jpeg"], accept_multiple_files=True)
-        ocr_key = st.secrets.get("OCRSPACE_API_KEY", "")
-        if files and ocr_key:
+    if mode == "Upload PDFs (OCR via cloud)":
+        if not ocr_key:
+            st.error("OCRSPACE_API_KEY is not set.")
+            render_footer()
+            return
+
+        files = st.file_uploader("Upload one or more malaria PDFs or images", 
+                                 type=["pdf", "png", "jpg", "jpeg"], 
+                                 accept_multiple_files=True)
+        if files:
             for f in files:
-                with st.spinner(f"Processing {f.name}..."):
+                with st.spinner(f"OCR processing {f.name}..."):
                     try:
-                        form_texts = ocr_from_file_grouped(f, ocr_key)
-                        for txt in form_texts:
-                            rec = normalize_record({"raw_text": txt})
-                            rec["species"] = infer_species(txt)
-                            rec["symptom_start"] = None
-                            rec["ingest_source"] = f.name
-                            rec["created_at"] = datetime.utcnow().isoformat()
-                            rec["validation_flags"] = json.dumps(validate_record(rec))
-                            records.append(rec)
+                        pages_text = cloud_ocr(f, api_key=ocr_key, languages="eng,ara")
+                        full_text = "\n".join(pages_text)
+                        rec = normalize_record(extract_fields_from_text(full_text))
+                        rec["raw_text"] = full_text
+                        rec["species"] = rec.get("species") or infer_species(full_text)
+                        rec["symptom_start"] = rec.get("symptom_start") or None
+                        rec["ingest_source"] = f.name
+                        rec["created_at"] = datetime.utcnow().isoformat(timespec="seconds")
+                        rec["validation_flags"] = json.dumps(validate_record(rec))
+                        records.append(rec)
                     except Exception as e:
-                        st.error(f"Error {f.name}: {e}")
+                        st.error(f"Error processing {f.name}: {str(e)}")
+            
             if records:
-                df = pd.DataFrame(records)
-                st.success(f"Processed {len(df)} record(s).")
+                df = to_df(records)
+                st.success(f"Processed {len(df)} file(s).")
                 st.dataframe(df, use_container_width=True)
+
     else:
-        xfile = st.file_uploader("Upload Excel (.xlsx)", type=["xlsx"])
+        xfile = st.file_uploader("Upload Excel (.xlsx) with malaria records", 
+                                 type=["xlsx"], 
+                                 accept_multiple_files=False)
         if xfile:
             try:
                 df = pd.read_excel(xfile)
-                for col in ["species", "symptom_start"]:
-                    if col not in df.columns:
+                for col in ["patient_name", "patient_id", "species", "symptom_start"]:
+                    if col not in df.columns: 
                         df[col] = None
-                df["created_at"] = datetime.utcnow().isoformat()
+                df["created_at"] = datetime.utcnow().isoformat(timespec="seconds")
                 df["validation_flags"] = [json.dumps(validate_record(r.to_dict())) for _, r in df.iterrows()]
                 st.success(f"Loaded {len(df)} rows from Excel.")
                 st.dataframe(df, use_container_width=True)
             except Exception as e:
-                st.error(f"Excel error: {e}")
+                st.error(f"Error reading Excel file: {str(e)}")
+
+    if not df.empty and "species" in df.columns:
+        st.subheader("Species Distribution")
+        species_counts = df["species"].fillna("Unknown").value_counts().sort_values(ascending=False)
+        st.bar_chart(species_counts)
 
     if not df.empty:
-        st.subheader("Exports")
-        if st.button("Download Excel"):
-            st.download_button("Excel", df.to_excel(index=False), file_name="malaria_data.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        report_name = st.text_input("Word report file name", value=f"report_{date.today().isoformat()}.docx")
-        if st.button("Generate Word Report"):
-            try:
-                path = generate_word_report(df, report_name)
-                with open(path, "rb") as fp:
-                    st.download_button("Download Word Report", fp.read(), file_name=report_name)
-            except Exception as e:
-                st.error(f"Word report failed: {e}")
+        st.subheader("Report")
+        name = f"malaria_report_{date.today().isoformat()}.docx"
+        report_name = st.text_input("Report file name", value=name)
+        
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("Generate Word report"):
+                try:
+                    p = generate_word_report(df, report_name)
+                    st.success(f"Report saved: {p}")
+                    with open(p, "rb") as f:
+                        st.download_button("Download report", 
+                                           data=f.read(),
+                                           file_name=report_name,
+                                           mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+                except Exception as e: 
+                    st.error(f"Report generation failed: {e}")
+        
+        with c2:
+            if st.button("Email report via Gmail"):
+                try:
+                    email_from = st.secrets.get("EMAIL_FROM")
+                    email_password = st.secrets.get("EMAIL_PASSWORD")
+                    email_to = st.secrets.get("EMAIL_TO")
+                    
+                    if not all([email_from, email_password, email_to]):
+                        st.error("Email configuration incomplete.")
+                    else:
+                        p = generate_word_report(df, report_name)
+                        email_file(p, "Malaria Report Update", email_from, email_password, email_to)
+                        st.success("Email sent successfully.")
+                except Exception as e: 
+                    st.error(f"Email failed: {e}")
+
+        # ✅ FIXED: Excel Download Button
+        st.subheader("Download Excel")
+        excel_buffer = io.BytesIO()
+        with pd.ExcelWriter(excel_buffer, engine="xlsxwriter") as writer:
+            df.to_excel(writer, index=False, sheet_name="Malaria Records")
+        excel_data = excel_buffer.getvalue()
+        st.download_button(
+            label="📥 Download Excel",
+            data=excel_data,
+            file_name="malaria_data.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
 
     render_footer()
 
+# ===== Main Entry =====
 def ensure_and_run():
-    if "logged_in" not in st.session_state:
-        st.session_state.logged_in = False
-    if not st.session_state.logged_in:
+    ensure_session()
+    if not st.session_state.logged_in: 
         render_login()
-    else:
+    else: 
         render_app()
 
 if __name__ == "__main__":
