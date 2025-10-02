@@ -1,41 +1,30 @@
 # extractor.py
-
 import re
+import json
+from form_structure import FORM_STRUCTURE
 
-def extract_fields_from_text(text: str) -> dict:
-    """
-    Extract fields from the raw OCR text.
-    You’ll need to adjust regex or parsing logic based on your form layout.
-    """
-    rec = {}
-    # Example: find “Patient Name: <value>” in text (adjust to your actual form)
-    m = re.search(r"Patient Name[:\s]+([A-Za-z0-9 ]+)", text)
-    if m:
-        rec["patient_name"] = m.group(1).strip()
-    else:
-        rec["patient_name"] = None
+def extract_fields_from_text(raw_text):
+    extracted = {}
+    lower_text = raw_text.lower()
 
-    # Example: find patient ID
-    m2 = re.search(r"Patient ID[:\s]+([A-Za-z0-9\-]+)", text)
-    if m2:
-        rec["patient_id"] = m2.group(1).strip()
-    else:
-        rec["patient_id"] = None
+    for field_key, field_info in FORM_STRUCTURE.items():
+        arabic_q = field_info.get("arabic")
+        english_q = field_info.get("english")
 
-    # You can add more extraction rules as needed:
-    # e.g. date of symptom start, location, etc.
+        # Build a pattern that matches either Arabic or English
+        pattern = rf"(?:{re.escape(arabic_q)}|{re.escape(english_q)}):?\s*(.*)"
 
-    return rec
+        match = re.search(pattern, raw_text, re.IGNORECASE)
+        if match:
+            value = match.group(1).strip()
+            extracted[field_key] = value
+        else:
+            extracted[field_key] = ""
 
-def normalize_record(rec: dict) -> dict:
-    """
-    Clean up, format and normalize the extracted record fields.
-    For example: unify date formats, default values, etc.
-    """
-    # Example normalization
-    if "patient_name" in rec and rec["patient_name"]:
-        rec["patient_name"] = rec["patient_name"].title()
-    else:
-        rec["patient_name"] = rec.get("patient_name", "")
-    # You can normalize dates, clean whitespace, etc.
-    return rec
+    return extracted
+
+def normalize_record(raw_fields):
+    record = {}
+    for k, v in raw_fields.items():
+        record[k] = v.strip() if isinstance(v, str) else v
+    return record
