@@ -1,7 +1,6 @@
 streamlit
 pandas
-python-docx
-matplotlib
-pymupdf
 openpyxl
 xlsxwriter
+python-docx
+PyMuPDF

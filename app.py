@@ -1,88 +1,92 @@
-# app.py
-
 import streamlit as st
 import pandas as pd
 import base64
-import datetime
 import io
-from ocr_utils import ocr_from_file_grouped
 from reports import generate_word_report
-import matplotlib.pyplot as plt
+from ocr_utils import ocr_from_file_grouped
+from extractor import extract_fields_from_text, normalize_record
+from validator import validate_record
+from form_mapper import map_ocr_to_form
 
-APP_NAME = "Malaria Epidemiological Analyzer"
-DEDICATION_TEXT = "Dedicated to the health professionals serving in endemic areas."
+APP_USERNAME = "admin"
+APP_PASSWORD = "malaria2025"
 
-# -- App Config --
-st.set_page_config(
-    page_title=APP_NAME,
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
-def show_footer():
-    st.markdown(
-        """
-        <div style='position: fixed; bottom: 0; width: 100%; text-align: center; font-size: small; padding: 10px; background-color: #f9f9f9;'>
-        <strong>All rights reserved © Dr. Mohammed Elnagi Mohammed</strong><br>
-        <em>{}</em>
-        </div>
-        """.format(DEDICATION_TEXT),
-        unsafe_allow_html=True
-    )
-
-def render_chart(data):
-    if 'Date of Onset' in data.columns:
-        data['Date of Onset'] = pd.to_datetime(data['Date of Onset'], errors='coerce')
-        epi_data = data['Date of Onset'].value_counts().sort_index()
-
-        st.subheader("Epi Curve")
-        fig, ax = plt.subplots(figsize=(10, 4))
-        epi_data.plot(kind='bar', ax=ax)
-        ax.set_title("Cases Over Time")
-        ax.set_xlabel("Date")
-        ax.set_ylabel("Number of Cases")
-        st.pyplot(fig)
-
-def render_table(df):
-    st.subheader("Structured Data")
-    st.dataframe(df)
-
-    # -- Export to Excel
-    excel_buffer = io.BytesIO()
-    with pd.ExcelWriter(excel_buffer, engine="xlsxwriter") as writer:
-        df.to_excel(writer, index=False, sheet_name="Malaria Data")
-    excel_data = excel_buffer.getvalue()
-    st.download_button("Download Excel", data=excel_data, file_name="malaria_data.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
-    # -- Export to Word
-    word_buffer = generate_word_report(df)
-    st.download_button("Download Word Report", data=word_buffer, file_name="malaria_report.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+def show_login():
+    st.title("🔐 Malaria Epidemiological Analyzer")
+    with st.form("login_form", clear_on_submit=False):
+        st.write("Please login to continue.")
+        username = st.text_input("Username")
+        password = st.text_input("Password", type="password")
+        submitted = st.form_submit_button("Login")
+        if submitted:
+            if username == APP_USERNAME and password == APP_PASSWORD:
+                st.session_state.logged_in = True
+                st.experimental_rerun()
+            else:
+                st.error("Invalid credentials")
+    # Dedication styled and below login box
+    st.markdown("""
+    <div style='margin-top: 40px; padding: 10px; color: darkblue; font-size: 16px; font-weight: bold;'>
+    Dedication: To the Soul of my late father Abdulrahman, my long living mother Zainab, my beloved wife Yousra and my eyes, Abdulrahman & Osman.
+    </div>
+    """, unsafe_allow_html=True)
+    # Footer
+    st.markdown("""
+    <div style='position: fixed; bottom: 10px; left: 10px; font-size: 12px; color: gray;'>
+    All rights reserved © Dr. Mohammedelnagi Mohammed
+    </div>
+    """, unsafe_allow_html=True)
 
 def render_app():
-    st.title(APP_NAME)
-    st.markdown("Upload Malaria Investigation Form (PDF). The app will extract and structure the data.")
+    st.title("📄 Malaria Case Investigation Form Processor")
 
-    uploaded_file = st.file_uploader("Upload multi-page PDF form (each patient = 4 pages)", type=["pdf"])
+    uploaded_files = st.file_uploader("Upload Malaria Investigation PDFs", type=["pdf"], accept_multiple_files=True)
 
-    if uploaded_file is not None:
-        with st.spinner("Processing... This might take a minute."):
-            try:
-                with open("temp.pdf", "wb") as f:
-                    f.write(uploaded_file.read())
-                records = ocr_from_file_grouped("temp.pdf")
+    if uploaded_files:
+        all_results = []
+        for pdf_file in uploaded_files:
+            ocr_texts = ocr_from_file_grouped(pdf_file)
+            for patient_pages in ocr_texts:
+                combined_text = "\n".join(patient_pages)
+                raw_record = extract_fields_from_text(combined_text)
+                normalized = normalize_record(raw_record)
+                validated = validate_record(normalized)
+                form_row = map_ocr_to_form(validated)
+                all_results.append(form_row)
 
-                if not records:
-                    st.error("No data extracted. Please check the PDF format.")
-                    return
+        df = pd.DataFrame(all_results)
 
-                df = pd.DataFrame(records)
-                render_table(df)
-                render_chart(df)
-            except Exception as e:
-                st.error(f"Processing failed: {e}")
+        # Download buttons
+        st.download_button("📥 Download Excel", convert_df_to_excel(df), file_name="malaria_data.xlsx")
+        st.download_button("📄 Download Word Report", generate_word_report(df), file_name="malaria_report.docx")
 
-    show_footer()
+        # Display dataframe
+        st.dataframe(df)
 
-# Run the app
-if __name__ == "__main__":
-    render_app()
+    # Persistent footer
+    st.markdown("""
+    <div style='position: fixed; bottom: 10px; left: 10px; font-size: 12px; color: gray;'>
+    All rights reserved © Dr. Mohammedelnagi Mohammed
+    </div>
+    """, unsafe_allow_html=True)
+
+def convert_df_to_excel(df):
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+        df.to_excel(writer, sheet_name="Data", index=False)
+        workbook = writer.book
+        worksheet = writer.sheets["Data"]
+        watermark_format = workbook.add_format({'font_color': 'gray', 'font_size': 8})
+        worksheet.write("A1", "© Dr. Mohammedelnagi Mohammed", watermark_format)
+    output.seek(0)
+    return output
+
+def ensure_and_run():
+    if "logged_in" not in st.session_state:
+        st.session_state.logged_in = False
+    if st.session_state.logged_in:
+        render_app()
+    else:
+        show_login()
+
+ensure_and_run()
