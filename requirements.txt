@@ -4,3 +4,6 @@ openpyxl
 xlsxwriter
 python-docx
 PyMuPDF
+requests
+matplotlib
+
