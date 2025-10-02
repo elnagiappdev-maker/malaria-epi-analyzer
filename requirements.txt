@@ -1,9 +1,7 @@
 streamlit
 pandas
 python-docx
-XlsxWriter
-openpyxl
-PyMuPDF
-requests
 matplotlib
-Pillow
+pymupdf
+openpyxl
+xlsxwriter

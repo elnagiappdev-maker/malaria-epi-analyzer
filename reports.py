@@ -1,70 +1,59 @@
 # reports.py
 
-import pandas as pd
-import matplotlib.pyplot as plt
 from docx import Document
 from docx.shared import Inches
+from io import BytesIO
+import matplotlib.pyplot as plt
+import pandas as pd
 
-def generate_word_report(df: pd.DataFrame, filename: str) -> str:
-    doc = Document()
-    doc.add_heading("Malaria Epidemiological Report", level=1)
-    doc.add_paragraph(f"Date: {pd.Timestamp.now().date().isoformat()}")
-
-    # Pie chart: species distribution
-    if "species" in df.columns:
-        counts = df["species"].fillna("Unknown").value_counts()
-        fig, ax = plt.subplots()
-        counts.plot.pie(autopct="%1.1f%%", ax=ax, legend=False)
-        ax.set_ylabel("")
-        fig.savefig("species_pie.png")
-        doc.add_heading("Species Distribution", level=2)
-        doc.add_picture("species_pie.png", width=Inches(4))
-
-    # EpiCurve: symptom_start dates
-    if "symptom_start" in df.columns:
-        df["symptom_start"] = pd.to_datetime(df["symptom_start"], errors="coerce")
-        df2 = df.dropna(subset=["symptom_start"])
-        if not df2.empty:
-            counts = df2.groupby(df2["symptom_start"].dt.date).size()
-            fig2, ax2 = plt.subplots(figsize=(5, 3))
-            counts.plot(kind="line", marker="o", ax=ax2)
-            ax2.set_xlabel("Date")
-            ax2.set_ylabel("Number of Cases")
-            fig2.savefig("epicurve.png")
-            doc.add_heading("EpiCurve", level=2)
-            doc.add_picture("epicurve.png", width=Inches(5))
-
-    # Add table of first few rows
-    doc.add_heading("Data Summary", level=2)
-    table = doc.add_table(rows=1, cols=len(df.columns))
+def generate_word_report(data: pd.DataFrame) -> BytesIO:
+    document = Document()
+    document.add_heading('Malaria Investigation Report', 0)
+    document.add_paragraph('Generated automatically by the Malaria Epidemiological Analyzer.')
+    
+    # Add Table
+    document.add_heading('Patient Records', level=1)
+    table = document.add_table(rows=1, cols=len(data.columns))
+    table.autofit = True
     hdr_cells = table.rows[0].cells
-    for i, c in enumerate(df.columns):
-        hdr_cells[i].text = str(c)
-    for _, row in df.iterrows():
+    for i, col in enumerate(data.columns):
+        hdr_cells[i].text = col
+
+    for _, row in data.iterrows():
         row_cells = table.add_row().cells
-        for i, c in enumerate(df.columns):
-            row_cells[i].text = str(row[c])
+        for i, val in enumerate(row):
+            row_cells[i].text = str(val)
 
-    out_path = filename
-    doc.save(out_path)
-    return out_path
+    # Pie Chart by Gender
+    if 'Sex الجنس' in data.columns:
+        gender_counts = data['Sex الجنس'].value_counts()
+        fig1, ax1 = plt.subplots()
+        ax1.pie(gender_counts, labels=gender_counts.index, autopct='%1.1f%%', startangle=90)
+        ax1.axis('equal')
+        pie_image = BytesIO()
+        plt.savefig(pie_image, format='png')
+        pie_image.seek(0)
+        document.add_picture(pie_image, width=Inches(4.5))
+        document.add_paragraph('Gender Distribution')
 
-def email_file(path: str, subject: str, from_addr: str, password: str, to_addr: str):
-    import smtplib, ssl
-    from email.message import EmailMessage
+    # Epi Curve
+    if 'Date of Onset تاريخ ظهور الاعراض' in data.columns:
+        onset_series = pd.to_datetime(data['Date of Onset تاريخ ظهور الاعراض'], errors='coerce')
+        curve = onset_series.value_counts().sort_index()
+        fig2, ax2 = plt.subplots()
+        curve.plot(kind='bar', ax=ax2)
+        ax2.set_title('Epi Curve - Cases Over Time')
+        ax2.set_xlabel('Date of Onset')
+        ax2.set_ylabel('Number of Cases')
+        curve_image = BytesIO()
+        plt.tight_layout()
+        plt.savefig(curve_image, format='png')
+        curve_image.seek(0)
+        document.add_picture(curve_image, width=Inches(6))
+        document.add_paragraph('Epi Curve')
 
-    msg = EmailMessage()
-    msg["Subject"] = subject
-    msg["From"] = from_addr
-    msg["To"] = to_addr
-
-    with open(path, "rb") as f:
-        file_data = f.read()
-        file_name = path
-
-    msg.add_attachment(file_data, maintype="application", subtype="octet-stream", filename=file_name)
-
-    context = ssl.create_default_context()
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context) as smtp:
-        smtp.login(from_addr, password)
-        smtp.send_message(msg)
+    # Export as BytesIO
+    buffer = BytesIO()
+    document.save(buffer)
+    buffer.seek(0)
+    return buffer
