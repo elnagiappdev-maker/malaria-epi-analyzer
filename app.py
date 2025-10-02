@@ -14,16 +14,17 @@ APP_PASSWORD = "malaria2025"
 def show_login():
     st.title("🔐 Malaria Epidemiological Analyzer")
     with st.form("login_form", clear_on_submit=False):
-        st.write("Please login to continue.")
-        username = st.text_input("admin")
-        password = st.text_input("Elnagi@2026", type="Elnagi@2026")
-        submitted = st.form_submit_button("Login")
-        if submitted:
-            if username == APP_USERNAME and password == APP_PASSWORD:
-                st.session_state.logged_in = True
-                st.experimental_rerun()
-            else:
-                st.error("Invalid credentials")
+    st.write("Please login to continue.")
+    username = st.text_input("Username")
+    password = st.text_input("Password", type="password")
+    submitted = st.form_submit_button("Login")
+    if submitted:
+        if username == APP_USERNAME and password == APP_PASSWORD:
+            st.session_state.logged_in = True
+            st.success("Login successful.")
+        else:
+            st.error("Invalid username or password")
+
     # Dedication styled and below login box
     st.markdown("""
     <div style='margin-top: 40px; padding: 10px; color: darkblue; font-size: 16px; font-weight: bold;'>
