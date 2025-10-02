@@ -1,90 +1,111 @@
 import streamlit as st
 import pandas as pd
-import base64
-import io
-from reports import generate_word_report
-from ocr_utils import ocr_from_file_grouped
 from extractor import extract_fields_from_text, normalize_record
-from validator import validate_record
-from form_mapper import map_ocr_to_form
+from ocr_utils import ocr_from_file_grouped
+from reports import generate_excel, generate_word_report
+from validator import validate_records
 
+# ---------------------------
+# App Credentials & Settings
+# ---------------------------
 APP_USERNAME = "admin"
-APP_PASSWORD = "malaria2025"
+APP_PASSWORD = "Elnagi@2026"
+DEDICATION_TEXT = (
+    "### 🌹 *To the Soul of my late father Abdulrahman, my long living mother Zainab, "
+    "my beloved wife Yousra, and my eyes, Abdulrahman & Osman.*"
+)
+RIGHTS_RESERVED = "© All Rights Reserved – Dr. Mohammedelnagi Mohammed"
 
+st.set_page_config(page_title="Malaria Epi Analyzer", layout="wide")
+
+# ---------------------------
+# Session State Init
+# ---------------------------
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
+
+# ---------------------------
+# Login Form
+# ---------------------------
 def show_login():
-    st.title("🔐 Malaria Epidemiological Analyzer")
+    st.markdown("<div style='text-align: center;'>"
+                "<h2>🔐 Login Required</h2></div>", unsafe_allow_html=True)
+    
     with st.form("login_form", clear_on_submit=False):
-    st.write("Please login to continue.")
-    username = st.text_input("Username")
-    password = st.text_input("Password", type="password")
-    submitted = st.form_submit_button("Login")
-    if submitted:
-        if username == APP_USERNAME and password == APP_PASSWORD:
-            st.session_state.logged_in = True
-            st.success("Login successful.")
-        else:
-            st.error("Invalid username or password")
+        st.write("Please login to continue.")
+        username = st.text_input("Username")
+        password = st.text_input("Password", type="password")
+        submitted = st.form_submit_button("Login")
 
-    # Dedication styled and below login box
-    st.markdown("""
-    <div style='margin-top: 40px; padding: 10px; color: darkblue; font-size: 16px; font-weight: bold;'>
-    Dedication: To the Soul of my late father Abdulrahman, my long living mother Zainab, my beloved wife Yousra and my eyes, Abdulrahman & Osman.
-    </div>
-    """, unsafe_allow_html=True)
-    # Footer
-    st.markdown("""
-    <div style='position: fixed; bottom: 10px; left: 10px; font-size: 12px; color: gray;'>
-    All rights reserved © Dr. Mohammedelnagi Mohammed
-    </div>
-    """, unsafe_allow_html=True)
+        if submitted:
+            if username == APP_USERNAME and password == APP_PASSWORD:
+                st.session_state.logged_in = True
+                st.success("Login successful.")
+            else:
+                st.error("Invalid username or password")
 
+    st.markdown(f"<div style='text-align: center; color: #C2185B; font-weight: bold;'>{DEDICATION_TEXT}</div>", unsafe_allow_html=True)
+    st.markdown(f"<div style='position: fixed; bottom: 10px; left: 10px; font-size: 12px; color: gray;'>{RIGHTS_RESERVED}</div>", unsafe_allow_html=True)
+
+
+# ---------------------------
+# Main App Interface
+# ---------------------------
 def render_app():
-    st.title("📄 Malaria Case Investigation Form Processor")
+    st.title("📊 Malaria Epidemiological Analyzer")
 
-    uploaded_files = st.file_uploader("Upload Malaria Investigation PDFs", type=["pdf"], accept_multiple_files=True)
+    uploaded_files = st.file_uploader("📄 Upload Malaria Investigation Form(s)", type=["pdf", "jpg", "jpeg", "png"], accept_multiple_files=True)
+
+    api_key = st.secrets.get("OCRSPACE_API_KEY", "")
+
+    if not api_key:
+        st.warning("⚠️ OCR API key not set. Please add it to your Streamlit secrets.")
+        return
 
     if uploaded_files:
-        all_results = []
-        for pdf_file in uploaded_files:
-            ocr_texts = ocr_from_file_grouped(pdf_file)
-            for patient_pages in ocr_texts:
-                combined_text = "\n".join(patient_pages)
-                raw_record = extract_fields_from_text(combined_text)
-                normalized = normalize_record(raw_record)
-                validated = validate_record(normalized)
-                form_row = map_ocr_to_form(validated)
-                all_results.append(form_row)
+        all_records = []
+        errors = []
+        for file in uploaded_files:
+            try:
+                pages = ocr_from_file_grouped(file, api_key=api_key)
+                for page_text in pages:
+                    fields = extract_fields_from_text(page_text)
+                    normalized = normalize_record(fields)
+                    all_records.append(normalized)
+            except Exception as e:
+                errors.append(f"❌ Error processing {file.name}: {str(e)}")
 
-        df = pd.DataFrame(all_results)
+        if errors:
+            st.error("\n\n".join(errors))
 
-        # Download buttons
-        st.download_button("📥 Download Excel", convert_df_to_excel(df), file_name="malaria_data.xlsx")
-        st.download_button("📄 Download Word Report", generate_word_report(df), file_name="malaria_report.docx")
+        if all_records:
+            df = pd.DataFrame(all_records)
 
-        # Display dataframe
-        st.dataframe(df)
+            valid, validation_errors = validate_records(df)
 
-    # Persistent footer
-    st.markdown("""
-    <div style='position: fixed; bottom: 10px; left: 10px; font-size: 12px; color: gray;'>
-    All rights reserved © Dr. Mohammedelnagi Mohammed
-    </div>
-    """, unsafe_allow_html=True)
+            if not valid:
+                st.warning("⚠️ Some records are invalid:")
+                st.json(validation_errors)
 
-def convert_df_to_excel(df):
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-        df.to_excel(writer, sheet_name="Data", index=False)
-        workbook = writer.book
-        worksheet = writer.sheets["Data"]
-        watermark_format = workbook.add_format({'font_color': 'gray', 'font_size': 8})
-        worksheet.write("A1", "© Dr. Mohammedelnagi Mohammed", watermark_format)
-    output.seek(0)
-    return output
+            st.success(f"✅ Processed {len(all_records)} records")
 
+            # Display table
+            st.dataframe(df)
+
+            # Export buttons
+            excel_data = generate_excel(df)
+            word_data = generate_word_report(df)
+
+            st.download_button("📥 Download Excel", excel_data, file_name="malaria_data.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            st.download_button("📥 Download Word Report", word_data, file_name="malaria_report.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+
+    st.markdown(f"<div style='position: fixed; bottom: 10px; left: 10px; font-size: 12px; color: gray;'>{RIGHTS_RESERVED}</div>", unsafe_allow_html=True)
+
+
+# ---------------------------
+# App Entry Point
+# ---------------------------
 def ensure_and_run():
-    if "logged_in" not in st.session_state:
-        st.session_state.logged_in = False
     if st.session_state.logged_in:
         render_app()
     else:
