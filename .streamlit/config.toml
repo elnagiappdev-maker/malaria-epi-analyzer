@@ -1,2 +1,7 @@
 [server]
+headless = true
+enableCORS = false
+maxUploadSize = 200
+
+[server]
 maxUploadSize = 50
